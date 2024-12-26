@@ -20,16 +20,16 @@ func main() {
 		memcachedOfficialTool = tool
 	}
 
+	srcTLS := false
+	srcTLSEnv := os.Getenv("DEST_MEMCACHED_TLS")
+	if strings.ToUpper(srcTLSEnv) == "TRUE" {
+		srcTLS = true
+	}
+
 	destTLS := false
 	destTLSEnv := os.Getenv("DEST_MEMCACHED_TLS")
 	if strings.ToUpper(destTLSEnv) == "TRUE" {
 		destTLS = true
-	}
-
-	skipTLSVerify := false
-	skipTLSVerifyEnv := os.Getenv("SKIP_TLS_VERIFY")
-	if strings.ToUpper(skipTLSVerifyEnv) == "TRUE" {
-		skipTLSVerify = true
 	}
 
 	srcServerList := os.Getenv("SRC_MEMCACHED_SERVERS")
@@ -49,7 +49,7 @@ func main() {
 		mcDest.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			var td tls.Dialer
 			td.Config = &tls.Config{
-				InsecureSkipVerify: skipTLSVerify,
+				InsecureSkipVerify: true,
 			}
 			return td.DialContext(ctx, network, addr)
 		}
@@ -61,6 +61,15 @@ func main() {
 		wg.Add(1)
 		go func() {
 			mcSrc := memcache.New(srcServer)
+			if srcTLS {
+				mcSrc.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+					var td tls.Dialer
+					td.Config = &tls.Config{
+						InsecureSkipVerify: true,
+					}
+					return td.DialContext(ctx, network, addr)
+				}
+			}
 			log.Printf("Start migrate data from server: %s\n", srcServer)
 			migrate(memcachedOfficialTool, srcServer, mcSrc, mcDest)
 			defer wg.Done()
