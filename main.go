@@ -2,8 +2,11 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"crypto/tls"
 	"github.com/bradfitz/gomemcache/memcache"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -15,6 +18,18 @@ func main() {
 	tool := os.Getenv("MEMCACHED_TOOL_PATH")
 	if tool != "" {
 		memcachedOfficialTool = tool
+	}
+
+	srcTLS := false
+	srcTLSEnv := os.Getenv("SRC_MEMCACHED_TLS")
+	if strings.ToUpper(srcTLSEnv) == "TRUE" {
+		srcTLS = true
+	}
+
+	destTLS := false
+	destTLSEnv := os.Getenv("DEST_MEMCACHED_TLS")
+	if strings.ToUpper(destTLSEnv) == "TRUE" {
+		destTLS = true
 	}
 
 	srcServerList := os.Getenv("SRC_MEMCACHED_SERVERS")
@@ -30,6 +45,15 @@ func main() {
 	destServers := strings.Split(destServerList, ",")
 
 	mcDest := memcache.New(destServers...)
+	if destTLS {
+		mcDest.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			var td tls.Dialer
+			td.Config = &tls.Config{
+				InsecureSkipVerify: true,
+			}
+			return td.DialContext(ctx, network, addr)
+		}
+	}
 
 	var wg sync.WaitGroup
 
@@ -37,6 +61,15 @@ func main() {
 		wg.Add(1)
 		go func() {
 			mcSrc := memcache.New(srcServer)
+			if srcTLS {
+				mcSrc.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+					var td tls.Dialer
+					td.Config = &tls.Config{
+						InsecureSkipVerify: true,
+					}
+					return td.DialContext(ctx, network, addr)
+				}
+			}
 			log.Printf("Start migrate data from server: %s\n", srcServer)
 			migrate(memcachedOfficialTool, srcServer, mcSrc, mcDest)
 			defer wg.Done()
