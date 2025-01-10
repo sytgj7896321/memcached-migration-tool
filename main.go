@@ -22,6 +22,9 @@ func main() {
 		wg.Add(1)
 		srcClient := NewMemcachedClient([]string{srcServer}, config.timeout, workers, config.srcMemcachedTLS)
 		go func() {
+			if config.srcMemcachedTLS {
+				srcServer = "tls:" + srcServer
+			}
 			log.Printf("Start migrate data from server: %s to servers: %v\n", srcServer, config.dstMemcachedServers)
 			migrate(config.memcachedOfficialToolPath, srcServer, srcClient.client, dstClient.client, &wg, workers)
 			wg.Done()
