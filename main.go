@@ -2,84 +2,39 @@ package main
 
 import (
 	"bufio"
-	"context"
-	"crypto/tls"
 	"github.com/bradfitz/gomemcache/memcache"
 	"log"
-	"net"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
 )
 
 func main() {
-	memcachedOfficialTool := "memcached-tool"
-	tool := os.Getenv("MEMCACHED_TOOL_PATH")
-	if tool != "" {
-		memcachedOfficialTool = tool
-	}
+	config := NewMemcachedConfiguration()
 
-	srcTLS := false
-	srcTLSEnv := os.Getenv("SRC_MEMCACHED_TLS")
-	if strings.ToUpper(srcTLSEnv) == "TRUE" {
-		srcTLS = true
-	}
-
-	destTLS := false
-	destTLSEnv := os.Getenv("DEST_MEMCACHED_TLS")
-	if strings.ToUpper(destTLSEnv) == "TRUE" {
-		destTLS = true
-	}
-
-	srcServerList := os.Getenv("SRC_MEMCACHED_SERVERS")
-	if srcServerList == "" {
-		log.Fatalln("SRC_MEMCACHED_SERVERS environment variable not set")
-	}
-	srcServers := strings.Split(srcServerList, ",")
-
-	destServerList := os.Getenv("DEST_MEMCACHED_SERVERS")
-	if destServerList == "" {
-		log.Fatalln("DEST_MEMCACHED_SERVERS environment variable not set")
-	}
-	destServers := strings.Split(destServerList, ",")
-
-	mcDest := memcache.New(destServers...)
-	if destTLS {
-		mcDest.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			var td tls.Dialer
-			td.Config = &tls.Config{
-				InsecureSkipVerify: true,
-			}
-			return td.DialContext(ctx, network, addr)
-		}
-	}
+	workers := config.poolSize
 
 	var wg sync.WaitGroup
 
-	for _, srcServer := range srcServers {
+	dstClient := NewMemcachedClient(config.dstMemcachedServers, config.timeout, workers, config.dstMemcachedTLS)
+
+	for _, srcServer := range config.srcMemcachedServers {
 		wg.Add(1)
+		srcClient := NewMemcachedClient([]string{srcServer}, config.timeout, workers, config.srcMemcachedTLS)
 		go func() {
-			mcSrc := memcache.New(srcServer)
-			if srcTLS {
-				mcSrc.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-					var td tls.Dialer
-					td.Config = &tls.Config{
-						InsecureSkipVerify: true,
-					}
-					return td.DialContext(ctx, network, addr)
-				}
-			}
-			log.Printf("Start migrate data from server: %s\n", srcServer)
-			migrate(memcachedOfficialTool, srcServer, mcSrc, mcDest)
-			defer wg.Done()
+			log.Printf("Start migrate data from server: %s to servers: %v\n", srcServer, config.dstMemcachedServers)
+			migrate(config.memcachedOfficialToolPath, srcServer, srcClient.client, dstClient.client, &wg, workers)
+			wg.Done()
 		}()
 	}
 
 	wg.Wait()
+	log.Println("Migration completed")
 }
 
-func migrate(memcachedOfficialTool, server string, mcSrc, mcDest *memcache.Client) {
+func migrate(memcachedOfficialTool, server string, mcSrc, mcDst *memcache.Client, wg *sync.WaitGroup, workers int) {
+	ch := make(chan string, workers)
+
 	cmd := exec.Command(memcachedOfficialTool, server, "keys")
 
 	// Get the standard output pipe of the command
@@ -95,27 +50,38 @@ func migrate(memcachedOfficialTool, server string, mcSrc, mcDest *memcache.Clien
 		return
 	}
 
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			for key := range ch {
+				item, err := mcSrc.Get(key)
+				if err != nil {
+					log.Printf("Get key %s error: %v", key, err)
+					continue
+				}
+				if item != nil {
+					err = mcDst.Set(item)
+					if err != nil {
+						log.Printf("Set key %s error: %v", key, err)
+						continue
+					}
+				} else {
+					log.Printf("Key %s not found", key)
+					continue
+				}
+			}
+			wg.Done()
+		}()
+	}
+
 	// Read the output line by line
 	scanner := bufio.NewScanner(stdout)
 	for scanner.Scan() {
 		line := scanner.Text()
 		key := strings.Split(strings.Split(line, " ")[0], "=")[1]
-		item, err := mcSrc.Get(key)
-		if err != nil {
-			log.Printf("Get key %s error: %v", key, err)
-			continue
-		}
-		if item != nil {
-			err = mcDest.Set(item)
-			if err != nil {
-				log.Printf("Set key %s error: %v", key, err)
-				continue
-			}
-		} else {
-			log.Printf("Key %s not found", key)
-			continue
-		}
+		ch <- key
 	}
+	close(ch)
 
 	// Check if there was an error reading the output
 	if err := scanner.Err(); err != nil {
