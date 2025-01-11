@@ -49,24 +49,23 @@ func migrate(server string, config MemcachedConfig, wg *sync.WaitGroup, workers 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			for key := range ch {
 				item, err := src.client.Get(key)
 				if err != nil {
-					log.Printf("Get key %s error: %v", item.Key, err)
+					log.Printf("Get key %s error: %v", key, err)
 					continue
 				}
-				if item != nil {
-					err = dst.client.Set(item)
-					if err != nil {
-						log.Printf("Set key %s error: %v", item.Key, err)
-						continue
-					}
-				} else {
-					log.Printf("Key %s not found", item.Key)
+				if item == nil {
+					log.Printf("Key %s not found", key)
+					continue
+				}
+				err = dst.client.Set(item)
+				if err != nil {
+					log.Printf("Set key %s error: %v", item.Key, err)
 					continue
 				}
 			}
-			wg.Done()
 		}()
 	}
 
