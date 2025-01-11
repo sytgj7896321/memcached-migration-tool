@@ -2,9 +2,10 @@ package main
 
 import (
 	"bufio"
-	"github.com/bradfitz/gomemcache/memcache"
+	"crypto/tls"
+	"fmt"
 	"log"
-	"os/exec"
+	"net"
 	"strings"
 	"sync"
 )
@@ -16,17 +17,11 @@ func main() {
 
 	var wg sync.WaitGroup
 
-	dstClient := NewMemcachedClient(config.dstMemcachedServers, config.timeout, workers, config.dstMemcachedTLS)
-
 	for _, srcServer := range config.srcMemcachedServers {
 		wg.Add(1)
-		srcClient := NewMemcachedClient([]string{srcServer}, config.timeout, workers, config.srcMemcachedTLS)
 		go func() {
-			if config.srcMemcachedTLS {
-				srcServer = "tls:" + srcServer
-			}
-			log.Printf("Start migrate data from server: %s to servers: %v\n", srcServer, config.dstMemcachedServers)
-			migrate(config.memcachedOfficialToolPath, srcServer, srcClient.client, dstClient.client, &wg, workers)
+			log.Printf("Start migrate data from server: %s to servers: %v", srcServer, config.dstMemcachedServers)
+			migrate(srcServer, config, &wg, workers)
 			wg.Done()
 		}()
 	}
@@ -35,41 +30,29 @@ func main() {
 	log.Println("Migration completed")
 }
 
-func migrate(memcachedOfficialTool, server string, mcSrc, mcDst *memcache.Client, wg *sync.WaitGroup, workers int) {
+func migrate(server string, config MemcachedConfig, wg *sync.WaitGroup, workers int) {
 	ch := make(chan string, workers)
 
-	cmd := exec.Command(memcachedOfficialTool, server, "keys")
-
-	// Get the standard output pipe of the command
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		log.Printf("Unable to obtain standard output pipe: %v", err)
-		return
-	}
-
-	// Start the command
-	if err := cmd.Start(); err != nil {
-		log.Printf("Failed to start command: %v", err)
-		return
-	}
+	src := NewMemcachedClient([]string{server}, config.timeout, workers, config.srcMemcachedTLS)
+	dst := NewMemcachedClient(config.dstMemcachedServers, config.timeout, workers, config.dstMemcachedTLS)
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
 			for key := range ch {
-				item, err := mcSrc.Get(key)
+				item, err := src.client.Get(key)
 				if err != nil {
-					log.Printf("Get key %s error: %v", key, err)
+					log.Printf("Get key %s error: %v", item.Key, err)
 					continue
 				}
 				if item != nil {
-					err = mcDst.Set(item)
+					err = dst.client.Set(item)
 					if err != nil {
-						log.Printf("Set key %s error: %v", key, err)
+						log.Printf("Set key %s error: %v", item.Key, err)
 						continue
 					}
 				} else {
-					log.Printf("Key %s not found", key)
+					log.Printf("Key %s not found", item.Key)
 					continue
 				}
 			}
@@ -77,23 +60,52 @@ func migrate(memcachedOfficialTool, server string, mcSrc, mcDst *memcache.Client
 		}()
 	}
 
-	// Read the output line by line
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		line := scanner.Text()
-		key := strings.Split(strings.Split(line, " ")[0], "=")[1]
-		ch <- key
-	}
-	close(ch)
+	listKeys(server, ch, config.srcMemcachedTLS)
+}
 
-	// Check if there was an error reading the output
-	if err := scanner.Err(); err != nil {
-		log.Printf("Error reading output: %v", err)
+func listKeys(server string, ch chan string, enableTls bool) {
+	var conn net.Conn
+	var err error
+	if enableTls {
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: true,
+		}
+		conn, err = tls.Dial("tcp", server, tlsConfig)
+	} else {
+		conn, err = net.Dial("tcp", server)
+	}
+	if err != nil {
+		log.Printf("Connect to server error: %v", err)
+		return
 	}
 
-	// Wait for the command to finish executing
-	if err := cmd.Wait(); err != nil {
-		log.Printf("Command failed: %v", err)
+	_, err = conn.Write([]byte(fmt.Sprintf("lru_crawler metadump all\r\n")))
+	if err != nil {
+		log.Printf("List keys error: %v", err)
+		return
 	}
 
+	reader := bufio.NewReader(conn)
+	for {
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			log.Printf("Read keys error: %v", err)
+			continue
+		}
+
+		response = strings.TrimSpace(response)
+		if response == "END" {
+			close(ch)
+			break
+		}
+
+		parts := strings.Split(response, " ")
+		ch <- strings.TrimPrefix(parts[0], "key=")
+	}
+	defer func(conn net.Conn) {
+		err := conn.Close()
+		if err != nil {
+			log.Printf("Error closing connection: %v", err)
+		}
+	}(conn)
 }
