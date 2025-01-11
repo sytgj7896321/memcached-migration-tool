@@ -34,7 +34,17 @@ func migrate(server string, config MemcachedConfig, wg *sync.WaitGroup, workers 
 	ch := make(chan string, workers)
 
 	src := NewMemcachedClient([]string{server}, config.timeout, workers, config.srcMemcachedTLS)
+	err := src.client.Ping()
+	if err != nil {
+		log.Printf("Ping server %s error: %v", server, err)
+		return
+	}
 	dst := NewMemcachedClient(config.dstMemcachedServers, config.timeout, workers, config.dstMemcachedTLS)
+	err = dst.client.Ping()
+	if err != nil {
+		log.Printf("Ping servers %v error: %v", config.dstMemcachedServers, err)
+		return
+	}
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
