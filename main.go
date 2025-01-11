@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"crypto/tls"
 	"fmt"
+	"github.com/bradfitz/gomemcache/memcache"
 	"log"
 	"net"
+	"net/url"
 	"strings"
 	"sync"
 )
@@ -45,6 +47,19 @@ func migrate(server string, config MemcachedConfig, wg *sync.WaitGroup, workers 
 		log.Printf("Ping servers %v error: %v", config.dstMemcachedServers, err)
 		return
 	}
+
+	defer func(client *memcache.Client) {
+		err := client.Close()
+		if err != nil {
+			log.Printf("Error closing source client: %v", err)
+		}
+	}(dst.client)
+	defer func(client *memcache.Client) {
+		err := client.Close()
+		if err != nil {
+			log.Printf("Error closing destination client: %v", err)
+		}
+	}(src.client)
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -109,7 +124,13 @@ func listKeys(server string, ch chan string, enableTls bool) {
 		}
 
 		parts := strings.Split(response, " ")
-		ch <- strings.TrimPrefix(parts[0], "key=")
+		encodedKey := strings.TrimPrefix(parts[0], "key=")
+		decodedKey, err := url.QueryUnescape(encodedKey)
+		if err != nil {
+			log.Printf("Decode key error: %v", err)
+			continue
+		}
+		ch <- decodedKey
 	}
 	defer func(conn net.Conn) {
 		err := conn.Close()
